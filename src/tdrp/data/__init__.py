@@ -22,6 +22,10 @@ from .splits import (
     leave_cell_line_out_split,
     tissue_holdout_split,
     kfold_cell_line_splits,
+    filter_entities,
+    make_random_pair_split,
+    make_cellline_holdout_split,
+    make_tissue_holdout_split,
 )
 
 __all__ = [
@@ -42,4 +46,8 @@ __all__ = [
     "leave_cell_line_out_split",
     "tissue_holdout_split",
     "kfold_cell_line_splits",
+    "filter_entities",
+    "make_random_pair_split",
+    "make_cellline_holdout_split",
+    "make_tissue_holdout_split",
 ]
