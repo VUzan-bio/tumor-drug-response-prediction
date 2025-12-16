@@ -1,21 +1,36 @@
 # Tumor Drug Response Prediction - Multi-Modal Omics + Chemistry (TDRP)
 
-Predict ln(IC50) for cell line - drug pairs by fusing gene expression with drug structure fingerprints. The goal is to generalize to unseen cell lines or tissues by combining omics and chemistry.
+## Overview
+- Cleaned and aligned GDSC2 dose-response, cell-line metadata, RNA-seq expression, and drug SMILES into processed parquet tables plus tissue-aware splits (random, cell-line holdout, tissue holdout).
+- Baseline PCA → MLP (sklearn) trained on concatenated omics/drug PCs; torch fusion model with optional VAE encoder for omics.
+- Test set performance (PCA+MLP baseline): random RMSE 2.61 / r 0.31; cell-line holdout RMSE 2.71 / r 0.23; tissue holdout RMSE 2.77 / r 0.19.
+- SHAP pipeline planned to surface gene signatures/pathways driving sensitivity vs resistance per drug/tissue.
 
-## Data expectations
-- `data/raw/GDSC2_fitted_dose_response_27Oct23.xlsx`
-- `data/raw/Cell_Lines_Details.xlsx`
-- `data/raw/screened_compounds_rel_8.5.csv`
-- `data/raw/TableS1A.xlsx` (expression matrix)
+Predict ln(IC50) for cell line–drug pairs by fusing gene expression with drug structure fingerprints, targeting generalization to unseen cell lines or tissues.
+
+## Data sources (expected under `data/raw/`)
+- `GDSC2_fitted_dose_response_27Oct23.xlsx` – fitted dose-response with ln(IC50).
+- `Cell_Lines_Details.xlsx` – COSMIC metadata (tissue, site, cancer type).
+- `screened_compounds_rel_8.5.csv` – drug IDs, targets, SMILES.
+- `TableS1A.xlsx` or `rnaseq_*20191101*.{txt,csv}` – RNA-seq expression matrix.
 
 ## Project layout
 ```
-configs/default.yaml
-data/{raw,processed,external}/
-scripts/{preprocess_gdsc.py,train.py,explain.py,eda_gdsc2.py}
-src/tdrp/...  # config, utils, data, featurizers, models, training, analysis
-requirements.txt
-pyproject.toml
+configs/default.yaml               # experiment defaults (dims, splits, device)
+data/raw/                          # raw GDSC2 inputs (not tracked)
+data/processed/                    # parquet tables + split CSVs
+data/processed/eda/                # lightweight EDA plots (tracked)
+outputs/                           # model artifacts, predictions, plots
+scripts/
+  eda_gdsc2.py                     # sanity checks/plots on raw inputs
+  preprocess_gdsc.py               # build omics/drug/labels/metadata parquet
+  make_splits.py                   # filter + random/cell/tissue splits
+  train.py                         # torch fusion model training
+  train_baseline_ml.py             # PCA+MLP baseline on split CSVs
+  explain.py                       # SHAP export for trained torch model
+  plot_embeddings.py               # project learned embeddings (PCA/UMAP)
+src/tdrp/                          # config, utils, featurizers, models, training, analysis
+requirements.txt, pyproject.toml   # deps (install RDKit via conda)
 ```
 
 ## Installation
@@ -27,13 +42,14 @@ pip install -r requirements.txt
 conda install -c conda-forge rdkit
 ```
 
-## Usage
-### EDA on raw GDSC2 files
+## Pipeline (reproducible commands)
+### 1) EDA on raw GDSC2 files
 ```bash
 python scripts/eda_gdsc2.py
 ```
+Plots are written to `outputs/eda/` and key counts are printed.
 
-### Preprocess GDSC2 into parquet tables
+### 2) Preprocess into parquet feature tables
 ```bash
 python scripts/preprocess_gdsc.py \
   --raw-dir data/raw \
@@ -41,13 +57,34 @@ python scripts/preprocess_gdsc.py \
   --n-genes 2000 \
   --fingerprint-bits 1024
 ```
+Outputs: `omics.parquet`, `drug_fingerprints.parquet`, `labels.parquet`, `metadata.parquet`.
 
-### Train
+### 3) Build filtered train/val/test splits
+```bash
+python scripts/make_splits.py \
+  --config configs/default.yaml \
+  --outdir data/processed/splits \
+  --test-tissues lung_NSCLC urogenital_system leukemia aero_dig_tract breast
+```
+Emits `random_pair_split.csv`, `cellline_holdout_split.csv`, `tissue_holdout_split.csv` with coverage filtering.
+
+### 4) Train models
+- Torch fusion model:
 ```bash
 python scripts/train.py --config configs/default.yaml --output outputs/gdsc2_run1
 ```
+(`split_strategy`/`use_vae` configurable in YAML.)
 
-### Explain with SHAP
+- PCA+MLP baseline on a chosen split:
+```bash
+python scripts/train_baseline_ml.py \
+  --processed-dir data/processed \
+  --split-csv data/processed/splits/random_pair_split.csv \
+  --outdir outputs/baseline_random \
+  --omics-pca 256 --drug-pca 128 --hidden-layers 512,256
+```
+
+### 5) SHAP explanations for the torch model
 ```bash
 python scripts/explain.py \
   --config configs/default.yaml \
@@ -56,8 +93,26 @@ python scripts/explain.py \
   --sample-size 500 \
   --background-size 100
 ```
+The exported `.npz` can be summarized to highlight gene signatures/pathways influencing sensitivity/resistance.
+
+### Optional: Embed/visualize representations
+```bash
+python scripts/plot_embeddings.py \
+  --embeddings outputs/gdsc2_run1/cell_embeddings.npz \
+  --metadata data/processed/metadata.parquet \
+  --method pca --color-by tissue \
+  --outpath outputs/gdsc2_run1/embeddings_pca_tissue.png
+```
+
+## Results (PCA+MLP baseline, test split metrics)
+| Split | Test RMSE | Test Pearson r |
+| --- | --- | --- |
+| Random | 2.61 | 0.31 |
+| Cell-line holdout | 2.71 | 0.23 |
+| Tissue holdout | 2.77 | 0.19 |
 
 ## Extending
-- Switch between PCA/MLP and VAE encoders via config (`model.use_vae`, latent dims).
-- Replace Morgan fingerprints with a graph featurizer (stub in `tdrp/featurizers/drugs.py`).
-- Evaluate generalization with `split_strategy=tissue_holdout` to hold out specific tissues.
+- Swap PCA encoder for VAE in the torch model (`model.use_vae=true`, `model.omics_latent_dim` tuned per config).
+- Replace Morgan fingerprints with a graph featurizer (`src/tdrp/featurizers/drugs.py` scaffold) to capture substructures.
+- Stress-test generalization with `split_strategy=tissue_holdout` or custom `--test-tissues` in `make_splits.py`.
+- Add richer interpretability: SHAP per drug/tissue, pathway enrichment on top genes, and embedding clustering vs tissues.

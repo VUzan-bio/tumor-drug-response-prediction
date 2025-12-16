@@ -4,7 +4,12 @@ data/external/
 data/processed/*
 !data/processed/eda/
 !data/processed/eda/**
-outputs/
+!data/processed/**/*.csv
+outputs/*
+!outputs/**/*.png
+!outputs/**/*.csv
+!outputs/**/*.json
+!outputs/**/*.md
 
 # Python artifacts
 __pycache__/
