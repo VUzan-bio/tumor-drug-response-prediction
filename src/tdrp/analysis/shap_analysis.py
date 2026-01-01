@@ -50,8 +50,9 @@ def compute_shap_values(
     sample_size: int = 1000,
     background_size: int = 100,
     device: str = "cpu",
+    seed: int = 0,
 ) -> dict:
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(seed)
     n_samples = min(sample_size, len(labels_df))
     sample_indices = rng.choice(len(labels_df), size=n_samples, replace=False)
     background_indices = rng.choice(len(labels_df), size=min(background_size, len(labels_df)), replace=False)
@@ -63,10 +64,15 @@ def compute_shap_values(
     wrapper = CombinedModelWrapper(model, device_t, omics_df.shape[1] - 1, drug_df.shape[1] - 1)
     explainer = shap.KernelExplainer(wrapper, X_background)
     shap_values = explainer.shap_values(X_sample, nsamples=100)
-    feature_names = list(omics_df.columns[1:]) + list(drug_df.columns[1:])
+    omics_feature_names = list(omics_df.columns[1:])
+    drug_feature_names = list(drug_df.columns[1:])
+    feature_names = omics_feature_names + drug_feature_names
     return {
         "shap_values": shap_values,
         "expected_value": explainer.expected_value,
         "feature_names": feature_names,
+        "omics_feature_names": omics_feature_names,
+        "drug_feature_names": drug_feature_names,
         "sample_indices": sample_indices,
+        "seed": seed,
     }

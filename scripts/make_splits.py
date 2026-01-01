@@ -6,6 +6,12 @@ Steps:
 - filter drugs/cell lines by coverage
 - emit random pair-wise, cell-line holdout, and tissue holdout splits
 
+Defaults:
+- Coverage filtering: min drug coverage=0.7, min cell-line coverage=0.6, drop tissues with <15 cell lines.
+- Random pair split: 70/15/15 train/val/test (tissue-stratified by default).
+- Cell-line holdout: 70/15/15 train/val/test per tissue (cell-line disjoint).
+- Tissue holdout: hold out selected tissues as test; remaining tissues split 80/20 train/val.
+
 Example:
 python scripts/make_splits.py \
   --config configs/default.yaml \

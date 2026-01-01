@@ -43,6 +43,7 @@ from tdrp.training.trainer import Trainer
 from tdrp.training.metrics import rmse, pearsonr
 from tdrp.utils.io import ensure_dir, save_json
 from tdrp.utils.logging import setup_logging
+from tdrp.utils.seed import set_seed
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience on val RMSE.")
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers.")
     parser.add_argument("--device", default="auto", help="Device string (cpu/cuda); 'auto' picks cuda if available.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--outdir", required=True, help="Output directory for model and metrics.")
     return parser.parse_args()
 
@@ -83,6 +85,7 @@ def _fit_transforms(
     split_df: pd.DataFrame,
     n_omics_pca: int,
     n_drug_pca: int,
+    seed: int,
 ) -> Tuple[StandardScaler, StandardScaler, PCA, PCA]:
     train_df = split_df[split_df["split"] == "train"]
     omics_idx = omics_df.set_index("cell_line")
@@ -94,10 +97,10 @@ def _fit_transforms(
     scaler_omics = StandardScaler().fit(omics_train)
     scaler_drug = StandardScaler().fit(drug_train)
 
-    pca_omics = PCA(n_components=min(n_omics_pca, omics_train.shape[1]), random_state=42).fit(
+    pca_omics = PCA(n_components=min(n_omics_pca, omics_train.shape[1]), random_state=seed).fit(
         scaler_omics.transform(omics_train)
     )
-    pca_drug = PCA(n_components=min(n_drug_pca, drug_train.shape[1]), random_state=42).fit(
+    pca_drug = PCA(n_components=min(n_drug_pca, drug_train.shape[1]), random_state=seed).fit(
         scaler_drug.transform(drug_train)
     )
     return scaler_omics, scaler_drug, pca_omics, pca_drug
@@ -188,8 +191,7 @@ def main() -> None:
     args = parse_args()
     setup_logging()
     ensure_dir(args.outdir)
-    np.random.seed(42)
-    torch.manual_seed(42)
+    set_seed(args.seed)
 
     device_str = args.device
     if args.device == "auto":
@@ -218,7 +220,12 @@ def main() -> None:
         raise ValueError("No rows remain after aligning split CSV with processed tables.")
 
     scaler_omics, scaler_drug, pca_omics, pca_drug = _fit_transforms(
-        tables["omics"], tables["drugs"], split_df, n_omics_pca=args.omics_pca, n_drug_pca=args.drug_pca
+        tables["omics"],
+        tables["drugs"],
+        split_df,
+        n_omics_pca=args.omics_pca,
+        n_drug_pca=args.drug_pca,
+        seed=args.seed,
     )
 
     train_loader, val_loader, test_loader = _make_loaders(
@@ -257,6 +264,7 @@ def main() -> None:
             "patience": args.patience,
             "batch_size": args.batch_size,
             "split_csv": args.split_csv,
+            "seed": args.seed,
         },
     }
     for split_name, m in metrics.items():

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 from typing import Dict
 
 import numpy as np
@@ -32,6 +33,13 @@ from sklearn.metrics import mean_squared_error
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.append(str(SRC))
+
+from tdrp.utils.seed import set_seed
 
 
 def pearsonr(x: np.ndarray, y: np.ndarray) -> float:
@@ -86,6 +94,7 @@ def train_one_split(
     n_omics_pca: int,
     n_drug_pca: int,
     hidden_layers: tuple[int, ...],
+    seed: int,
 ):
     outdir.mkdir(parents=True, exist_ok=True)
     tables = load_processed(processed_dir)
@@ -107,10 +116,10 @@ def train_one_split(
     scaler_omics = StandardScaler().fit(omics_mat_train)
     scaler_drug = StandardScaler().fit(drug_mat_train)
 
-    pca_omics = PCA(n_components=min(n_omics_pca, omics_mat_train.shape[1]), random_state=42).fit(
+    pca_omics = PCA(n_components=min(n_omics_pca, omics_mat_train.shape[1]), random_state=seed).fit(
         scaler_omics.transform(omics_mat_train)
     )
-    pca_drug = PCA(n_components=min(n_drug_pca, drug_mat_train.shape[1]), random_state=42).fit(
+    pca_drug = PCA(n_components=min(n_drug_pca, drug_mat_train.shape[1]), random_state=seed).fit(
         scaler_drug.transform(drug_mat_train)
     )
 
@@ -131,7 +140,7 @@ def train_one_split(
         learning_rate_init=1e-3,
         alpha=1e-4,
         max_iter=50,
-        random_state=42,
+        random_state=seed,
         early_stopping=True,
         n_iter_no_change=5,
         verbose=False,
@@ -154,6 +163,7 @@ def train_one_split(
         "omics_pca": int(pca_omics.n_components_),
         "drug_pca": int(pca_drug.n_components_),
         "hidden_layers": list(hidden_layers),
+        "seed": int(seed),
     }
 
     pd.DataFrame([metrics]).to_json(outdir / "metrics.json", orient="records", lines=True)
@@ -249,9 +259,11 @@ def main():
         default="512,256",
         help="Comma-separated hidden layer sizes for the MLP.",
     )
+    ap.add_argument("--seed", type=int, default=42, help="Random seed.")
     args = ap.parse_args()
 
     hidden = tuple(int(x) for x in args.hidden_layers.split(",") if x)
+    set_seed(args.seed)
 
     train_one_split(
         processed_dir=Path(args.processed_dir),
@@ -260,6 +272,7 @@ def main():
         n_omics_pca=args.omics_pca,
         n_drug_pca=args.drug_pca,
         hidden_layers=hidden,
+        seed=args.seed,
     )
 
 

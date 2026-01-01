@@ -2,17 +2,50 @@
 
 ## Overview
 - Cleaned and aligned GDSC2 dose-response, cell-line metadata, RNA-seq expression, and drug SMILES into processed parquet tables plus tissue-aware splits (random, cell-line holdout, tissue holdout).
-- Baseline PCA → MLP (sklearn) trained on concatenated omics/drug PCs; torch fusion model with optional VAE encoder for omics.
+- Baseline PCA + MLP (sklearn) trained on concatenated omics/drug PCs; torch fusion model with optional VAE encoder for omics.
 - Test set performance (PCA+MLP baseline): random RMSE 2.61 / r 0.31; cell-line holdout RMSE 2.71 / r 0.23; tissue holdout RMSE 2.77 / r 0.19.
-- SHAP pipeline planned to surface gene signatures/pathways driving sensitivity vs resistance per drug/tissue.
+- SHAP pipeline surfaces gene signatures/pathways driving sensitivity vs resistance per drug/tissue.
+- Scope: RNA-seq expression only today (multi-omics branches are a planned extension).
 
-Predict ln(IC50) for cell line–drug pairs by fusing gene expression with drug structure fingerprints, targeting generalization to unseen cell lines or tissues.
+Predict ln(IC50) for cell line-drug pairs by fusing gene expression with drug structure fingerprints, targeting generalization to unseen cell lines or tissues.
 
-## Data sources (expected under `data/raw/`)
-- `GDSC2_fitted_dose_response_27Oct23.xlsx` – fitted dose-response with ln(IC50).
-- `Cell_Lines_Details.xlsx` – COSMIC metadata (tissue, site, cancer type).
-- `screened_compounds_rel_8.5.csv` – drug IDs, targets, SMILES.
-- `TableS1A.xlsx` or `rnaseq_*20191101*.{txt,csv}` – RNA-seq expression matrix.
+## Architecture
+```mermaid
+flowchart LR
+  A[Raw GDSC2 files] --> B[EDA]
+  A --> C[Preprocess + Align]
+  C --> D[Processed parquet tables]
+  D --> E[Coverage filtering]
+  E --> F[Splits: random/cell-line/tissue]
+  F --> G[Baselines: PCA+MLP]
+  F --> H[Fusion model]
+  G --> I[Metrics + plots]
+  H --> I
+  H --> J[SHAP (gene + FP)]
+  G --> K[SHAP (PCA baseline)]
+  H --> L[Embeddings]
+```
+
+## Modeling Details
+- Fusion strategy: encode omics + drug fingerprints, concatenate latents, then regress with a small MLP (`src/tdrp/models/fusion.py`).
+- VAE option: denoises omics before encoding; use when noise reduction helps generalization (validate via ablations).
+- Drug featurization: Morgan fingerprints (RDKit). A graph featurizer stub exists for future graph-based encoders.
+- Omics inputs: RNA-seq only. Multi-omics branches (mutation/CNV/methylation) are not implemented yet.
+
+## Splits and Coverage Filtering
+- Coverage thresholds (defaults): min drug coverage=0.7, min cell-line coverage=0.6, drop tissues with <15 cell lines.
+- Random pair split: 70/15/15 train/val/test, tissue-stratified by default.
+- Cell-line holdout: 70/15/15 train/val/test per tissue (cell lines are disjoint).
+- Tissue holdout: test set = selected tissues; remaining tissues split 80/20 train/val.
+
+## Data Leakage Considerations
+- The current splits are tissue/cell-line aware but not temporal. If batch effects or time-based leakage are a concern, add a time- or batch-stratified split on the raw GDSC2 metadata.
+
+## Data Sources (expected under `data/raw/`)
+- `GDSC2_fitted_dose_response_27Oct23.xlsx` - fitted dose-response with ln(IC50).
+- `Cell_Lines_Details.xlsx` - COSMIC metadata (tissue, site, cancer type).
+- `screened_compounds_rel_8.5.csv` - drug IDs, targets, SMILES.
+- `TableS1A.xlsx` or `rnaseq_*20191101*.{txt,csv}` - RNA-seq expression matrix.
 
 ## Installation
 ```bash
@@ -36,9 +69,10 @@ python scripts/preprocess_gdsc.py \
   --raw-dir data/raw \
   --outdir data/processed \
   --n-genes 2000 \
-  --fingerprint-bits 1024
+  --fingerprint-bits 1024 \
+  --manifest-out outputs/data_manifest.json
 ```
-Outputs: `omics.parquet`, `drug_fingerprints.parquet`, `labels.parquet`, `metadata.parquet`.
+Outputs: `omics.parquet`, `drug_fingerprints.parquet`, `labels.parquet`, `metadata.parquet`, plus `outputs/data_manifest.json`.
 
 ### 3) Build filtered train/val/test splits
 ```bash
@@ -49,7 +83,15 @@ python scripts/make_splits.py \
 ```
 Emits `random_pair_split.csv`, `cellline_holdout_split.csv`, `tissue_holdout_split.csv` with coverage filtering.
 
-### 4) Train models
+### 4) (Optional) Refresh data manifest with split sizes
+```bash
+python scripts/data_manifest.py \
+  --processed-dir data/processed \
+  --splits-dir data/processed/splits \
+  --out outputs/data_manifest.json
+```
+
+### 5) Train models
 - Torch fusion model:
 ```bash
 python scripts/train.py --config configs/default.yaml --output outputs/gdsc2_run1
@@ -65,7 +107,7 @@ python scripts/train_baseline_ml.py \
   --omics-pca 256 --drug-pca 128 --hidden-layers 512,256
 ```
 
-### 5) SHAP explanations for the torch model
+### 6) SHAP explanations for the torch model
 ```bash
 python scripts/explain.py \
   --config configs/default.yaml \
@@ -91,6 +133,28 @@ python scripts/plot_embeddings.py \
 | Random | 2.61 | 0.31 |
 | Cell-line holdout | 2.71 | 0.23 |
 | Tissue holdout | 2.77 | 0.19 |
+
+Baseline reference and plots live in `reports/baseline_ml.md`.
+
+## Baselines and Reporting
+- `scripts/train_baseline_ml.py` is the reference sklearn baseline.
+- `scripts/train_torch_baseline.py` mirrors PCA + MLP in torch for comparability.
+- `scripts/train.py` trains the fusion model with optional VAE.
+
+## SHAP Interpretation
+- Fusion model SHAP uses gene symbols and fingerprint bit columns as feature names.
+- PCA baseline SHAP uses PCA component names; for gene-level interpretation, prefer the fusion model.
+- Optional: pass `--manifest outputs/data_manifest.json` to `scripts/explain_torch_baseline.py` to attach original feature name lists.
+
+## Reproducibility Notes
+- Dependency versions are pinned in `requirements.txt` and `pyproject.toml`.
+- Random seeds are set in training/explanation scripts; for strict determinism, also set `PYTHONHASHSEED=42`.
+- GPU is recommended for SHAP and torch training; CPU runs are supported but slower.
+
+## Outputs Organization
+- `outputs/eda/` is generated by `scripts/eda_gdsc2.py`.
+- `data/processed/eda/` contains curated EDA artifacts (examples/checkpoints).
+- `outputs/data_manifest.json` summarizes processed data, missingness, and split sizes (if splits exist).
 
 ## Extending
 - Swap PCA encoder for VAE in the torch model (`model.use_vae=true`, `model.omics_latent_dim` tuned per config).

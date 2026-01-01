@@ -1,3 +1,15 @@
+"""
+Generate a JSON manifest summarizing processed tables and optional split CSVs.
+
+Example:
+python scripts/data_manifest.py \
+  --processed-dir data/processed \
+  --splits-dir data/processed/splits \
+  --out outputs/data_manifest.json
+"""
+
+from __future__ import annotations
+
 import argparse
 from pathlib import Path
 import sys
@@ -9,27 +21,15 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.append(str(SRC))
 
-from tdrp.data.gdsc2_preprocess import preprocess_gdsc2
 from tdrp.utils.io import load_parquet, save_json
 from tdrp.utils.logging import setup_logging
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Preprocess GDSC2 raw files into parquet tables.")
-    parser.add_argument("--raw-dir", default="data/raw", help="Directory containing raw GDSC2 files.")
-    parser.add_argument("--outdir", default="data/processed", help="Output directory for processed parquet files.")
-    parser.add_argument("--n-genes", type=int, default=2000, help="Number of top-variance genes to keep.")
-    parser.add_argument("--fingerprint-bits", type=int, default=1024, help="Number of bits for Morgan fingerprints.")
-    parser.add_argument(
-        "--manifest-out",
-        default="outputs/data_manifest.json",
-        help="Output path for a JSON manifest summarizing processed tables.",
-    )
-    parser.add_argument(
-        "--splits-dir",
-        default=None,
-        help="Optional directory with split CSVs to summarize (defaults to <outdir>/splits if present).",
-    )
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Create a data manifest from processed tables and splits.")
+    parser.add_argument("--processed-dir", default="data/processed", help="Directory with processed parquet files.")
+    parser.add_argument("--splits-dir", default=None, help="Optional directory with split CSVs to summarize.")
+    parser.add_argument("--out", default="outputs/data_manifest.json", help="Output JSON path.")
     return parser.parse_args()
 
 
@@ -94,32 +94,22 @@ def _summarize_splits(splits_dir: Path) -> dict:
     return summary
 
 
-def main():
+def main() -> None:
     setup_logging()
     args = parse_args()
-    preprocess_gdsc2(
-        raw_dir=args.raw_dir,
-        processed_dir=args.outdir,
-        n_genes=args.n_genes,
-        fingerprint_bits=args.fingerprint_bits,
-    )
-    processed_path = Path(args.outdir)
-    omics_df = load_parquet(processed_path / "omics.parquet")
-    drug_fp_df = load_parquet(processed_path / "drug_fingerprints.parquet")
-    labels_df = load_parquet(processed_path / "labels.parquet")
-    metadata_df = load_parquet(processed_path / "metadata.parquet")
-    print("Saved omics:", (processed_path / "omics.parquet").resolve(), "shape", omics_df.shape)
-    print("Saved drug_fingerprints:", (processed_path / "drug_fingerprints.parquet").resolve(), "shape", drug_fp_df.shape)
-    print("Saved labels:", (processed_path / "labels.parquet").resolve(), "shape", labels_df.shape)
-    print("Saved metadata:", (processed_path / "metadata.parquet").resolve(), "shape", metadata_df.shape)
+    processed_dir = Path(args.processed_dir)
+    omics_df = load_parquet(processed_dir / "omics.parquet")
+    drug_fp_df = load_parquet(processed_dir / "drug_fingerprints.parquet")
+    labels_df = load_parquet(processed_dir / "labels.parquet")
+    metadata_df = load_parquet(processed_dir / "metadata.parquet")
 
     manifest = _summarize_processed(omics_df, drug_fp_df, labels_df, metadata_df)
-    splits_dir = Path(args.splits_dir) if args.splits_dir else processed_path / "splits"
+    splits_dir = Path(args.splits_dir) if args.splits_dir else processed_dir / "splits"
     if splits_dir.exists():
         manifest["splits_dir"] = str(splits_dir)
         manifest["splits"] = _summarize_splits(splits_dir)
-    save_json(manifest, Path(args.manifest_out))
-    print("Saved data manifest:", Path(args.manifest_out).resolve())
+
+    save_json(manifest, Path(args.out))
 
 
 if __name__ == "__main__":

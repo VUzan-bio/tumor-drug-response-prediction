@@ -12,7 +12,8 @@ python scripts/explain_torch_baseline.py \
   --transforms outputs/torch_baseline_random/transforms.joblib \
   --metrics outputs/torch_baseline_random/metrics.json \
   --output outputs/torch_baseline_random/shap_values.npz \
-  --sample-size 500 --background-size 100 --split test
+  --sample-size 500 --background-size 100 --split test \
+  --manifest outputs/data_manifest.json
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ if str(SRC) not in sys.path:
 from tdrp.models.torch_mlp import TorchMLP
 from tdrp.utils.io import ensure_dir
 from tdrp.utils.logging import setup_logging
+from tdrp.utils.seed import set_seed
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True, help="Path to model.pt from train_torch_baseline.py.")
     parser.add_argument("--transforms", required=True, help="Path to transforms.joblib (scalers + PCA).")
     parser.add_argument("--metrics", help="Optional metrics.json to read hidden layers/dropout config.")
+    parser.add_argument("--manifest", help="Optional data_manifest.json to attach original feature names.")
     parser.add_argument("--output", required=True, help="Output .npz path for SHAP values.")
     parser.add_argument("--split", default="test", choices=["train", "val", "test", "all"], help="Which split to explain.")
     parser.add_argument("--sample-size", type=int, default=500, help="Number of samples to explain.")
@@ -62,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-layers", type=int, nargs="+", default=None, help="Hidden layers if metrics.json not provided.")
     parser.add_argument("--dropout", type=float, default=None, help="Dropout if metrics.json not provided.")
     parser.add_argument("--device", default="auto", help="Device string (cpu/cuda); auto picks cuda if available.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for sampling.")
     return parser.parse_args()
 
 
@@ -111,8 +115,7 @@ def main() -> None:
     args = parse_args()
     setup_logging()
     ensure_dir(Path(args.output).parent)
-    np.random.seed(42)
-    torch.manual_seed(42)
+    set_seed(args.seed)
 
     device_str = args.device
     if args.device == "auto":
@@ -170,7 +173,7 @@ def main() -> None:
     drug_idx = tables["drugs"].set_index("drug")
     X_all = _build_features(split_df, omics_idx, drug_idx, scaler_omics, scaler_drug, pca_omics, pca_drug)
 
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(args.seed)
     n_samples = min(args.sample_size, len(X_all))
     sample_idx = rng.choice(len(X_all), size=n_samples, replace=False)
     bg_idx = rng.choice(len(X_all), size=min(args.background_size, len(X_all)), replace=False)
@@ -185,14 +188,23 @@ def main() -> None:
     feature_names = [f"omics_pca_{i}" for i in range(pca_omics.n_components_)] + [
         f"drug_pca_{i}" for i in range(pca_drug.n_components_)
     ]
-    np.savez(
-        args.output,
-        shap_values=shap_values,
-        expected_value=explainer.expected_value,
-        feature_names=feature_names,
-        sample_indices=sample_idx,
-        split=args.split,
-    )
+    out = {
+        "shap_values": shap_values,
+        "expected_value": explainer.expected_value,
+        "feature_names": feature_names,
+        "sample_indices": sample_idx,
+        "split": args.split,
+        "seed": args.seed,
+    }
+    if args.manifest:
+        with open(args.manifest, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        if "omics_features" in manifest:
+            out["omics_feature_names"] = manifest["omics_features"]
+        if "drug_features" in manifest:
+            out["drug_feature_names"] = manifest["drug_features"]
+
+    np.savez(args.output, **out)
     logging.info("Saved SHAP values to %s", args.output)
 
 
