@@ -48,6 +48,46 @@ def _normalize_id(value) -> Optional[str]:
         return str(value).strip()
 
 
+def _normalize_cell_line_name(value: str) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip().upper()
+
+
+def _strip_cell_line_descriptor(value: str) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if "," in text:
+        text = text.split(",", 1)[0]
+    return text.strip()
+
+
+def _build_name_map(map_df: pd.DataFrame) -> dict[str, str]:
+    """Map normalized cell line names to SANGER_MODEL_ID values."""
+    if "cell_line_name" not in map_df.columns:
+        return {}
+    subset = map_df[["cell_line_name", "cell_line"]].dropna()
+    name_map = {}
+    for _, row in subset.iterrows():
+        key = _normalize_cell_line_name(row["cell_line_name"])
+        if key:
+            name_map[key] = str(row["cell_line"])
+    return name_map
+
+
+def _maybe_drop_metadata_rows(df: pd.DataFrame, expr_cols: list[str]) -> pd.DataFrame:
+    """Drop the first 3 rows if they look like metadata (non-numeric)."""
+    if len(df) < 4:
+        return df
+    head = df[expr_cols].head(3)
+    numeric = head.apply(pd.to_numeric, errors="coerce")
+    non_numeric_frac = float(numeric.isna().mean().mean())
+    if non_numeric_frac > 0.5:
+        return df.iloc[3:].copy()
+    return df
+
+
 # ---------------------------------------------------------------------------
 # Loaders
 # ---------------------------------------------------------------------------
@@ -153,8 +193,9 @@ def load_rnaseq_expression(
     metadata: pd.DataFrame,
     allowed_cell_lines: Optional[set[str]] = None,
     n_genes: int = 2000,
+    name_map: Optional[dict[str, str]] = None,
 ) -> pd.DataFrame:
-    """Load RNA-seq expression, map COSMIC->cell_line, keep top-variance genes, z-score."""
+    """Load RNA-seq expression, map cell line names to SANGER IDs, keep top-variance genes, z-score."""
     root = Path(root_dir)
     # Prefer FPKM file; fall back to read counts.
     expr_files = sorted(
@@ -162,33 +203,62 @@ def load_rnaseq_expression(
         + list(root.glob("rnaseq_read_count_20191101.*"))
         + list(root.glob("rnaseq_*20191101*.txt"))
         + list(root.glob("rnaseq_*20191101*.csv"))
+        + list(root.glob("E-MTAB-3983*.tsv"))
+        + list(root.glob("E-MTAB-3983*.txt"))
+        + list(root.glob("E-MTAB-3983*.csv"))
     )
     if not expr_files:
         raise FileNotFoundError(f"No expression file (.txt or .csv) found under {root}")
     # Prefer fpkm if present
     fpkm_files = [p for p in expr_files if "fpkm" in p.name.lower()]
-    expr_file = fpkm_files[0] if fpkm_files else expr_files[0]
-    sep = "\t" if expr_file.suffix == ".txt" else ","
-    df = pd.read_csv(expr_file, sep=sep, low_memory=False)
+    emtab_files = [p for p in expr_files if "e-mtab-3983" in p.name.lower()]
+    if fpkm_files:
+        expr_file = fpkm_files[0]
+    elif emtab_files:
+        expr_file = emtab_files[0]
+    else:
+        expr_file = expr_files[0]
+    sep = "\t" if expr_file.suffix.lower() in [".txt", ".tsv"] else ","
+    df = pd.read_csv(expr_file, sep=sep, low_memory=False, comment="#")
     logger.info("Loaded expression file %s with shape %s", expr_file.name, df.shape)
 
-    # File layout: first two columns are gene_id, gene_symbol; first three rows are metadata
-    data = df.iloc[3:].copy()
-    data.columns = df.columns
-    gene_id_col, gene_symbol_col = data.columns[:2]
-    data.index = data[gene_symbol_col].fillna(data[gene_id_col])
-    data = data.drop(columns=[gene_id_col, gene_symbol_col])
-    data = data.apply(pd.to_numeric, errors="coerce")
-    data = data.transpose()
-    data.index.name = "cell_line"
-    data.reset_index(inplace=True)
+    # File layout: first two columns are gene_id, gene_symbol; some files include 3 metadata rows.
+    gene_id_col = _find_column(df, ["gene_id", "gene id", "ensembl_gene_id"], "expression")
+    gene_symbol_col = _find_column(df, ["gene_name", "gene name", "gene_symbol", "gene symbol"], "expression")
+    if gene_id_col is None:
+        gene_id_col = df.columns[0]
+    if gene_symbol_col is None and len(df.columns) > 1:
+        gene_symbol_col = df.columns[1]
 
-    expr = data.rename(columns={"index": "cell_line"})
+    expr_cols = [c for c in df.columns if c not in {gene_id_col, gene_symbol_col}]
+    data = _maybe_drop_metadata_rows(df, expr_cols)
+    gene_ids = data[gene_id_col].astype(str)
+    gene_symbols = data[gene_symbol_col].astype(str) if gene_symbol_col else gene_ids
+    gene_labels = gene_symbols.fillna(gene_ids)
+
+    values = data[expr_cols].apply(pd.to_numeric, errors="coerce")
+    values.index = gene_labels
+    expr = values.transpose()
+    expr.index = [_strip_cell_line_descriptor(c) for c in expr.index]
+    expr.index.name = "cell_line"
+
+    if name_map:
+        mapped = pd.Series(expr.index, index=expr.index).map(lambda x: name_map.get(_normalize_cell_line_name(x)))
+        n_mapped = int(mapped.notna().sum())
+        logger.info("Mapped %d/%d expression samples to SANGER IDs.", n_mapped, len(expr))
+        mask = mapped.notna()
+        expr = expr.loc[mask].copy()
+        expr.index = mapped[mask].astype(str).values
+
     if allowed_cell_lines is not None:
-        expr = expr[expr["cell_line"].isin(allowed_cell_lines)]
+        expr = expr[expr.index.isin(allowed_cell_lines)]
 
-    expr = expr.set_index("cell_line")
+    if expr.empty:
+        raise ValueError("No expression samples remain after mapping/filtering. Check cell line identifiers.")
+
     expr = expr.dropna(axis=1, how="all")
+    if not expr.index.is_unique:
+        expr = expr.groupby(expr.index).mean()
     # Drop unnamed columns and collapse duplicate gene symbols by averaging.
     expr = expr.loc[:, ~expr.columns.isna()]
     if expr.columns.has_duplicates:
@@ -250,6 +320,7 @@ def preprocess_gdsc2(raw_dir: str, processed_dir: str, n_genes: int = 2000, fing
     metadata_df = load_cell_line_metadata(str(meta_path))
     logger.info("Loading dose-response...")
     labels_df, map_df = load_gdsc2_dose_response(str(dose_path), metadata_df)
+    name_map = _build_name_map(map_df)
     logger.info("Building metadata with SANGER_MODEL_ID...")
     metadata_df = metadata_df.merge(map_df, on="cosmic_id", how="inner", suffixes=("_meta", "_map"))
     if "cell_line_map" in metadata_df.columns:
@@ -266,7 +337,13 @@ def preprocess_gdsc2(raw_dir: str, processed_dir: str, n_genes: int = 2000, fing
     logger.info("Loading drug table...")
     drugs_df = load_gdsc2_drugs(str(drugs_path))
     logger.info("Loading RNA-seq expression...")
-    omics_df = load_rnaseq_expression(str(expr_dir), metadata_df, allowed_cell_lines=set(labels_df["cell_line"]), n_genes=n_genes)
+    omics_df = load_rnaseq_expression(
+        str(expr_dir),
+        metadata_df,
+        allowed_cell_lines=set(labels_df["cell_line"]),
+        n_genes=n_genes,
+        name_map=name_map,
+    )
 
     omics_df, labels_df, drugs_df, metadata_df = align_all(omics_df, labels_df, drugs_df, metadata_df)
 
