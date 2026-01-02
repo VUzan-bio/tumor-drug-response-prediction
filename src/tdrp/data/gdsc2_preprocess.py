@@ -63,6 +63,12 @@ def _strip_cell_line_descriptor(value: str) -> str:
     return text.strip()
 
 
+def _normalize_drug_name(value: str) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip().upper()
+
+
 def _build_name_map(map_df: pd.DataFrame) -> dict[str, str]:
     """Map normalized cell line names to SANGER_MODEL_ID values."""
     if "cell_line_name" not in map_df.columns:
@@ -135,6 +141,37 @@ def load_gdsc2_drugs(path: str) -> pd.DataFrame:
 
     drugs = drugs.drop_duplicates(subset=["drug"]).reset_index(drop=True)
     return drugs
+
+
+def load_gdsc_drug_annotation(path: str) -> pd.DataFrame:
+    """Load drug annotation with SMILES, keyed by drug name."""
+    df = pd.read_csv(path)
+    if df.columns.size > 0:
+        first_col = str(df.columns[0])
+        if first_col == "" or first_col.lower().startswith("unnamed"):
+            df = df.rename(columns={df.columns[0]: "drug_name"})
+    df = normalize_columns(df)
+    if "drug_name" not in df.columns:
+        df = df.rename(columns={df.columns[0]: "drug_name"})
+    smiles_col = _find_column(
+        df,
+        [
+            "canonical_smilesrdkit",
+            "canonicalsmilesrdkit",
+            "canonical_smiles",
+            "canonicalsmiles",
+            "smiles",
+        ],
+        "drug annotation",
+    )
+    if smiles_col is None:
+        raise ValueError(f"Drug annotation missing SMILES columns: {list(df.columns)}")
+    ann = df[["drug_name", smiles_col]].copy()
+    ann = ann.rename(columns={smiles_col: "smiles"})
+    ann["drug_name"] = ann["drug_name"].astype(str)
+    ann["smiles"] = ann["smiles"].astype(str)
+    ann = ann.dropna(subset=["drug_name", "smiles"]).drop_duplicates(subset=["drug_name"])
+    return ann
 
 
 def load_gdsc2_dose_response(path: str, metadata: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -249,6 +286,7 @@ def load_rnaseq_expression(
         mask = mapped.notna()
         expr = expr.loc[mask].copy()
         expr.index = mapped[mask].astype(str).values
+        expr.index.name = "cell_line"
 
     if allowed_cell_lines is not None:
         expr = expr[expr.index.isin(allowed_cell_lines)]
@@ -336,6 +374,26 @@ def preprocess_gdsc2(raw_dir: str, processed_dir: str, n_genes: int = 2000, fing
 
     logger.info("Loading drug table...")
     drugs_df = load_gdsc2_drugs(str(drugs_path))
+    if drugs_df["smiles"].isna().all():
+        ann_path = raw_path / "GDSC_DrugAnnotation.csv"
+        if ann_path.exists():
+            logger.info("Merging drug SMILES from %s", ann_path.name)
+            ann_df = load_gdsc_drug_annotation(str(ann_path))
+            drugs_df["drug_name_norm"] = drugs_df.get("drug_name", "").apply(_normalize_drug_name)
+            ann_df["drug_name_norm"] = ann_df["drug_name"].apply(_normalize_drug_name)
+            merged = drugs_df.merge(
+                ann_df[["drug_name_norm", "smiles"]],
+                on="drug_name_norm",
+                how="left",
+                suffixes=("", "_ann"),
+            )
+            filled = merged["smiles"].isna() & merged["smiles_ann"].notna()
+            if filled.any():
+                merged.loc[filled, "smiles"] = merged.loc[filled, "smiles_ann"]
+            drugs_df = merged.drop(columns=["smiles_ann", "drug_name_norm"])
+            logger.info("Filled SMILES for %d/%d drugs.", int(filled.sum()), len(drugs_df))
+        else:
+            logger.warning("No drug annotation file found at %s; SMILES remain missing.", ann_path)
     logger.info("Loading RNA-seq expression...")
     omics_df = load_rnaseq_expression(
         str(expr_dir),
