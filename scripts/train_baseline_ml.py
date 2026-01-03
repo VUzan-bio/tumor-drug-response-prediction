@@ -19,6 +19,10 @@ You can re-run with different split CSVs (cellline_holdout_split.csv, tissue_hol
 to test generalization.
 """
 
+# NOTE: On Windows, this baseline may require MKL BLAS (conda-forge
+# `libblas=*=*mkl` and `mkl`) to avoid OpenBLAS crashes during PCA/SVD.
+# If the interpreter exits with no traceback, run `python scripts/test_linalg.py`.
+
 from __future__ import annotations
 
 import argparse
@@ -97,6 +101,7 @@ def train_one_split(
     seed: int,
 ):
     outdir.mkdir(parents=True, exist_ok=True)
+    print("load_processed", flush=True)
     tables = load_processed(processed_dir)
     split_df = pd.read_csv(split_csv)
 
@@ -110,12 +115,14 @@ def train_one_split(
     val_df = split_df[split_df["split"] == "val"]
     test_df = split_df[split_df["split"] == "test"]
 
+    print("fit_scalers", flush=True)
     omics_mat_train = tables["omics"].set_index("cell_line").loc[train_df["cell_line"]].to_numpy(dtype=np.float32)
     drug_mat_train = tables["drugs"].set_index("drug").loc[train_df["drug"]].to_numpy(dtype=np.float32)
 
     scaler_omics = StandardScaler().fit(omics_mat_train)
     scaler_drug = StandardScaler().fit(drug_mat_train)
 
+    print("fit_pca", flush=True)
     pca_omics = PCA(n_components=min(n_omics_pca, omics_mat_train.shape[1]), random_state=seed).fit(
         scaler_omics.transform(omics_mat_train)
     )
@@ -123,6 +130,7 @@ def train_one_split(
         scaler_drug.transform(drug_mat_train)
     )
 
+    print("build_features", flush=True)
     X_train, y_train = build_features(
         tables["omics"], tables["drugs"], train_df, pca_omics, pca_drug, scaler_omics, scaler_drug
     )
@@ -133,6 +141,7 @@ def train_one_split(
         tables["omics"], tables["drugs"], test_df, pca_omics, pca_drug, scaler_omics, scaler_drug
     )
 
+    print("fit_mlp", flush=True)
     mlp = MLPRegressor(
         hidden_layer_sizes=hidden_layers,
         activation="relu",
